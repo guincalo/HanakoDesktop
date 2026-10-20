@@ -345,8 +345,8 @@ bool checkInstalled(QString path = {}) {
 		}
 	}
 
-	const auto installed = u"AyuGram Desktop/AyuGram.lnk"_q;
-	const auto old = u"AyuGram for Windows/AyuGram.lnk"_q;
+	const auto installed = u"Hanako Desktop/Hanako.lnk"_q;
+	const auto old = u"Hanako for Windows/Hanako.lnk"_q;
 	return validateShortcutAt(path + installed)
 		|| validateShortcutAt(path + old);
 }

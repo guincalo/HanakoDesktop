@@ -1,0 +1,252 @@
+name: Hanako Windows x64.
+
+# Two jobs so each gets the full 6h GitHub-hosted limit:
+#   libraries: builds Qt/ffmpeg/openssl/webrtc/... with prepare.py and
+#              saves them to the Actions cache even when it times out
+#              (prepare.py skips finished libraries on the next run).
+#   build:     restores the libraries and builds Hanako.exe (Release),
+#              then packs a portable zip and an Inno Setup installer.
+
+on:
+  push:
+    branches: [hanako]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'lib/xdg/**'
+      - 'snap/**'
+      - 'Telegram/build/docker/**'
+      - 'Telegram/SourceFiles/platform/linux/**'
+      - 'Telegram/SourceFiles/platform/mac/**'
+      - '.github/workflows/linux.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: win-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PREPARE_PATH: "Telegram/build/prepare/prepare.py"
+  REPO_NAME: tdesktop
+
+jobs:
+
+  libraries:
+    name: Libraries (x64)
+    runs-on: windows-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: cmd
+    outputs:
+      cache_key: ${{ steps.setup.outputs.cache_key }}
+    steps:
+      - name: Free up runner disk space.
+        shell: pwsh
+        run: |
+          $targets = @('C:\Android','C:\Miniconda','C:\Julia','C:\Program Files\MongoDB','C:\Program Files\MySQL','C:\Program Files\PostgreSQL','C:\Program Files\Amazon','C:\Program Files\Microsoft SQL Server','C:\Program Files (x86)\Microsoft SQL Server','C:\Program Files (x86)\Google','C:\Program Files\R','C:\hostedtoolcache\windows\Java_Temurin-Hotspot_jdk','C:\hostedtoolcache\windows\Ruby','C:\hostedtoolcache\windows\go','C:\hostedtoolcache\windows\PyPy','C:\tools\kotlinc','C:\SeleniumWebDrivers')
+          foreach ($t in $targets) { if (Test-Path $t) { Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue } }
+          Write-Host ("C: {0:N1} GB free" -f ((Get-PSDrive C).Free / 1GB))
+
+      - name: Prepare directories.
+        run: |
+          if exist D:\ (
+            mkdir D:\TBuild\Libraries
+            mklink /d %GITHUB_WORKSPACE%\TBuild D:\TBuild
+          ) else (
+            mkdir C:\TBuild\Libraries
+            mklink /d %GITHUB_WORKSPACE%\TBuild C:\TBuild
+          )
+          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
+          echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
+
+      - name: Clone.
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
+
+      - name: First set up.
+        id: setup
+        shell: bash
+        run: |
+          DOCPATH=$TBUILD/$REPO_NAME/docs/building-win.md
+          SDK="$(grep "SDK version" $DOCPATH | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/')"
+          echo "SDK=$SDK" >> $GITHUB_ENV
+          echo "$(sha256sum $TBUILD/$REPO_NAME/$PREPARE_PATH | awk '{ print $1 }')" >> CACHE_KEY.txt
+          echo "$SDK" >> CACHE_KEY.txt
+          KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')
+          echo "CACHE_KEY=$KEY" >> $GITHUB_ENV
+          echo "cache_key=$KEY" >> $GITHUB_OUTPUT
+          git config --global user.email "ci@hanako.invalid"
+          git config --global user.name "Hanako CI"
+
+      - uses: Eden-CI/msvc-dev-cmd@master
+        name: Native Tools Command Prompt.
+        with:
+          arch: x64
+          sdk: ${{ env.SDK }}
+          toolset: '14.44'
+
+      - name: NuGet sources.
+        run: |
+          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
+          nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
+
+      - name: Restore libraries cache.
+        id: cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ env.TBUILD }}\ThirdParty
+            ${{ env.LibrariesPath }}
+          key: win64-libs-complete-${{ env.CACHE_KEY }}
+          restore-keys: |
+            win64-libs-partial-${{ env.CACHE_KEY }}-
+            win64-libs-
+
+      - name: Libraries.
+        id: libs
+        if: steps.cache.outputs.cache-hit != 'true'
+        timeout-minutes: 320
+        run: |
+          %TBUILD%\%REPO_NAME%\Telegram\build\prepare\win.bat silent
+
+      - name: Trim library build trees.
+        if: always() && steps.cache.outputs.cache-hit != 'true' && steps.libs.outcome == 'success'
+        shell: bash
+        run: find $LibrariesPath '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.dll' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' ')' -type f ')' -o -empty ')' -delete
+
+      - name: Save complete libraries.
+        if: always() && steps.cache.outputs.cache-hit != 'true' && steps.libs.outcome == 'success'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ env.TBUILD }}\ThirdParty
+            ${{ env.LibrariesPath }}
+          key: win64-libs-complete-${{ env.CACHE_KEY }}
+
+      - name: Save partial libraries (resume next run).
+        if: always() && steps.cache.outputs.cache-hit != 'true' && steps.libs.outcome != 'success' && steps.libs.outcome != 'skipped'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ env.TBUILD }}\ThirdParty
+            ${{ env.LibrariesPath }}
+          key: win64-libs-partial-${{ env.CACHE_KEY }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+  build:
+    name: Hanako (x64 Release)
+    needs: libraries
+    runs-on: windows-latest
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: cmd
+    steps:
+      - name: Free up runner disk space.
+        shell: pwsh
+        run: |
+          $targets = @('C:\Android','C:\Miniconda','C:\Julia','C:\Program Files\MongoDB','C:\Program Files\MySQL','C:\Program Files\PostgreSQL','C:\Program Files\Amazon','C:\Program Files\Microsoft SQL Server','C:\Program Files (x86)\Microsoft SQL Server','C:\Program Files (x86)\Google','C:\Program Files\R','C:\hostedtoolcache\windows\Java_Temurin-Hotspot_jdk','C:\hostedtoolcache\windows\Ruby','C:\hostedtoolcache\windows\go','C:\hostedtoolcache\windows\PyPy','C:\tools\kotlinc','C:\SeleniumWebDrivers')
+          foreach ($t in $targets) { if (Test-Path $t) { Remove-Item -Recurse -Force $t -ErrorAction SilentlyContinue } }
+          Write-Host ("C: {0:N1} GB free" -f ((Get-PSDrive C).Free / 1GB))
+
+      - name: Prepare directories.
+        run: |
+          if exist D:\ (
+            mkdir D:\TBuild\Libraries
+            mklink /d %GITHUB_WORKSPACE%\TBuild D:\TBuild
+          ) else (
+            mkdir C:\TBuild\Libraries
+            mklink /d %GITHUB_WORKSPACE%\TBuild C:\TBuild
+          )
+          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
+          echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
+
+      - name: Clone.
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
+
+      - name: First set up.
+        shell: bash
+        run: |
+          DOCPATH=$TBUILD/$REPO_NAME/docs/building-win.md
+          SDK="$(grep "SDK version" $DOCPATH | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/')"
+          echo "SDK=$SDK" >> $GITHUB_ENV
+          sed -i '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/${_Zi}//' "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake || true
+          VER=$(grep '^AppVersionStr ' $TBUILD/$REPO_NAME/Telegram/build/version | awk '{print $2}')
+          echo "APP_VERSION=$VER" >> $GITHUB_ENV
+          echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
+
+      - uses: Eden-CI/msvc-dev-cmd@master
+        name: Native Tools Command Prompt.
+        with:
+          arch: x64
+          sdk: ${{ env.SDK }}
+          toolset: '14.44'
+
+      - name: Restore libraries cache.
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ env.TBUILD }}\ThirdParty
+            ${{ env.LibrariesPath }}
+          key: win64-libs-complete-${{ needs.libraries.outputs.cache_key }}
+          fail-on-cache-miss: true
+
+      - name: Hanako build.
+        env:
+          API_ID: ${{ secrets.TDESKTOP_API_ID }}
+          API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
+        run: |
+          if "%API_ID%"=="" (set "API=-D TDESKTOP_API_TEST=ON") else (set "API=-D TDESKTOP_API_ID=%API_ID% -D TDESKTOP_API_HASH=%API_HASH%")
+          cd %TBUILD%\%REPO_NAME%\Telegram
+          call configure.bat x64 %API% ^
+          -D CMAKE_CONFIGURATION_TYPES=Release ^
+          -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
+          -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
+          if %errorlevel% neq 0 exit /b %errorlevel%
+          cmake --build ..\out --config Release --parallel
+
+      - name: Pack portable zip.
+        shell: bash
+        run: |
+          OUT=$TBUILD/$REPO_NAME/out/Release
+          ls -la $OUT | head -50
+          test -f $OUT/Hanako.exe
+          mkdir -p pkg/Hanako
+          cp $OUT/Hanako.exe pkg/Hanako/
+          if [ -d $OUT/modules ]; then cp -r $OUT/modules pkg/Hanako/; fi
+          # Portable mode: tdesktop keeps tdata next to the exe when this marker dir is absent;
+          # we ship it as-is (same layout as the official Telegram.zip).
+          cd pkg && 7z a -tzip ../Hanako-$APP_VERSION-$SHORT_SHA-win64-portable.zip Hanako
+
+      - uses: actions/upload-artifact@v7
+        name: Upload portable zip.
+        with:
+          name: Hanako-win64-portable
+          path: Hanako-*-win64-portable.zip
+          retention-days: 30
+
+      - name: Build installer.
+        id: installer
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          $rel = "$env:TBUILD\$env:REPO_NAME\out\Release"
+          & $iscc "/DMyAppVersion=$env:APP_VERSION" "/DMyAppVersionFull=$env:APP_VERSION-$env:SHORT_SHA" "/DReleasePath=$rel" "/DMyBuildTarget=win64" "$env:TBUILD\$env:REPO_NAME\Telegram\build\setup.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item "$rel\hanakosetup-x64.*.exe" .
+
+      - uses: actions/upload-artifact@v7
+        name: Upload installer.
+        if: steps.installer.outcome == 'success'
+        with:
+          name: Hanako-win64-installer
+          path: hanakosetup-x64.*.exe
+          retention-days: 30
