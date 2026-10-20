@@ -93,6 +93,62 @@ jobs:
           nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
           nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
 
+      # breakpad's dump_syms needs ATL at a legacy VC path Visual Studio dropped.
+      - name: Make ATL available.
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          Write-Host "Visual Studio: $vs"
+
+          function Find-AtlRoot {
+            if ($env:VCToolsInstallDir) {
+              $preferred = Join-Path $env:VCToolsInstallDir 'atlmfc'
+              if (Test-Path (Join-Path $preferred 'include\atlbase.h')) { return $preferred }
+            }
+            $found = Get-ChildItem "$vs\VC\Tools\MSVC\*\atlmfc\include\atlbase.h" -ErrorAction SilentlyContinue |
+              Sort-Object FullName -Descending | Select-Object -First 1
+            if ($found) { return (Split-Path (Split-Path $found.FullName -Parent) -Parent) }
+            return $null
+          }
+
+          $atlRoot = Find-AtlRoot
+          if (-not $atlRoot) {
+            Write-Host 'ATL is not installed, adding the component.'
+            $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+            $p = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList `
+              'modify', '--installPath', "`"$vs`"", `
+              '--add', 'Microsoft.VisualStudio.Component.VC.ATL', `
+              '--quiet', '--norestart', '--nocache'
+            if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
+              Write-Error "vs_installer failed with $($p.ExitCode)"; exit 1
+            }
+            $atlRoot = Find-AtlRoot
+          }
+          if (-not $atlRoot) { Write-Error 'atlbase.h still not found'; exit 1 }
+
+          Write-Host "ATL root: $atlRoot"
+
+          # Compiler finds ATL headers via /I, linker finds atls.lib via LibraryPath - link both.
+          $legacy = Join-Path $vs 'VC\atlmfc'
+          $toolset = Join-Path $env:VCToolsInstallDir 'atlmfc'
+          foreach ($link in @($legacy, $toolset)) {
+            if (Test-Path $link) {
+              Write-Host "$link already exists"
+            } else {
+              New-Item -ItemType Junction -Path $link -Target $atlRoot | Out-Null
+              Write-Host "Linked $link -> $atlRoot"
+            }
+          }
+
+          foreach ($probe in @(
+            (Join-Path $legacy 'include\atlbase.h'),
+            (Join-Path $legacy 'include\atlcomcli.h'),
+            (Join-Path $toolset 'lib\x64\atls.lib'))) {
+            if (-not (Test-Path $probe)) { Write-Error "unreachable: $probe"; exit 1 }
+            Write-Host "found $probe"
+          }
+
       - name: Restore libraries cache.
         id: cache
         uses: actions/cache/restore@v6
@@ -186,6 +242,62 @@ jobs:
           arch: x64
           sdk: ${{ env.SDK }}
           toolset: '14.44'
+
+      # breakpad's dump_syms needs ATL at a legacy VC path Visual Studio dropped.
+      - name: Make ATL available.
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          Write-Host "Visual Studio: $vs"
+
+          function Find-AtlRoot {
+            if ($env:VCToolsInstallDir) {
+              $preferred = Join-Path $env:VCToolsInstallDir 'atlmfc'
+              if (Test-Path (Join-Path $preferred 'include\atlbase.h')) { return $preferred }
+            }
+            $found = Get-ChildItem "$vs\VC\Tools\MSVC\*\atlmfc\include\atlbase.h" -ErrorAction SilentlyContinue |
+              Sort-Object FullName -Descending | Select-Object -First 1
+            if ($found) { return (Split-Path (Split-Path $found.FullName -Parent) -Parent) }
+            return $null
+          }
+
+          $atlRoot = Find-AtlRoot
+          if (-not $atlRoot) {
+            Write-Host 'ATL is not installed, adding the component.'
+            $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+            $p = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList `
+              'modify', '--installPath', "`"$vs`"", `
+              '--add', 'Microsoft.VisualStudio.Component.VC.ATL', `
+              '--quiet', '--norestart', '--nocache'
+            if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
+              Write-Error "vs_installer failed with $($p.ExitCode)"; exit 1
+            }
+            $atlRoot = Find-AtlRoot
+          }
+          if (-not $atlRoot) { Write-Error 'atlbase.h still not found'; exit 1 }
+
+          Write-Host "ATL root: $atlRoot"
+
+          # Compiler finds ATL headers via /I, linker finds atls.lib via LibraryPath - link both.
+          $legacy = Join-Path $vs 'VC\atlmfc'
+          $toolset = Join-Path $env:VCToolsInstallDir 'atlmfc'
+          foreach ($link in @($legacy, $toolset)) {
+            if (Test-Path $link) {
+              Write-Host "$link already exists"
+            } else {
+              New-Item -ItemType Junction -Path $link -Target $atlRoot | Out-Null
+              Write-Host "Linked $link -> $atlRoot"
+            }
+          }
+
+          foreach ($probe in @(
+            (Join-Path $legacy 'include\atlbase.h'),
+            (Join-Path $legacy 'include\atlcomcli.h'),
+            (Join-Path $toolset 'lib\x64\atls.lib'))) {
+            if (-not (Test-Path $probe)) { Write-Error "unreachable: $probe"; exit 1 }
+            Write-Host "found $probe"
+          }
 
       - name: Restore libraries cache.
         uses: actions/cache/restore@v6
