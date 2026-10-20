@@ -18,6 +18,7 @@ on:
       - 'Telegram/SourceFiles/platform/win/**'
       - 'Telegram/SourceFiles/platform/mac/**'
       - 'Telegram/build/setup.iss'
+      - 'Telegram/build/prepare/**'
       - '.github/workflows/win.yml'
   workflow_dispatch:
 
@@ -70,7 +71,10 @@ jobs:
         run: |
           python3 -m pip install --user jinja2
           cd Telegram/build/docker/centos_env
-          DEBUG= LTO= python3 gen_dockerfile.py > Dockerfile
+          # gen_dockerfile.py renders the Dockerfile template in place: capture first, then write.
+          DOCKERFILE=$(DEBUG= LTO= python3 gen_dockerfile.py)
+          echo "$DOCKERFILE" > Dockerfile
+          head -5 Dockerfile; wc -l Dockerfile
           rm -rf __pycache__
 
       - name: Free up some disk space.

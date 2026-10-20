@@ -80,7 +80,7 @@ Windows (VS 2022/2026 with the v14.44 toolset, SDK 10.0.26100.0):
 
 Linux (docker):
 
-    cd Telegram/build/docker/centos_env && DEBUG= LTO= python3 gen_dockerfile.py > Dockerfile
+    cd Telegram/build/docker/centos_env && D=$(DEBUG= LTO= python3 gen_dockerfile.py) && echo "$D" > Dockerfile
     docker build -t hanako-env .
     cd ../../../.. && docker run --rm -u $(id -u) -v $PWD:/usr/src/tdesktop -e CONFIG=Release hanako-env \
       /usr/src/tdesktop/Telegram/build/docker/centos_env/build.sh -D TDESKTOP_API_ID=... -D TDESKTOP_API_HASH=... -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON
